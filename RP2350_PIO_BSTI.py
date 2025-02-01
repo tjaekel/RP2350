@@ -7,10 +7,10 @@ from machine import Pin
 #sampling (read): sample with falling edge
 #we use a DIR signal for debug (or level shifters): after 1.5 cycles Turn Around - change direction on read
 #GPIO pins:
-#GPIO2: MCLK  - output signal
-#GPIO3: MDOUT - output signal
-#GPIO4: DIR   - output signal (for debug and level shifter, see where the read phase is)
-#GPIO5: MDIN  - input signal: ATT: it needs a config to be an input
+#GPIO2 7: MCLK  - output signal
+#GPIO3 8: MDOUT - output signal
+#GPIO4 10: DIR   - output signal (for debug and level shifter, see where the read phase is)
+#GPIO5 9: MDIN  - input signal: ATT: it needs a config to be an input
 
 #clock generator - free running clock, INTs for rising (IRQ 4) and falling edge (IRQ 5)
 #we have to tweak code so that out level changing happens on falling edge, too fast does not work anymore
@@ -84,24 +84,24 @@ def dataRead():
 FREQ = 10000000								#max: 18750000MHz, best is <= 10000000, faster gets more wrong
 
 #this is needed to do, otherwise "in(pins,1)" does not work!
-pin_5 = Pin(5, mode=Pin.IN, pull=Pin.PULL_UP)
+pin_5 = Pin(9, mode=Pin.IN, pull=Pin.PULL_UP)
 
 SM = 4
 
 #CLK generator: SM0
-sm0 = rp2.StateMachine(SM + 0, clk, freq=FREQ * 8, sideset_base=Pin(2)) #times 8 is because of code in clk SM (8 cycles)
+sm0 = rp2.StateMachine(SM + 0, clk, freq=FREQ * 8, sideset_base=Pin(7)) #times 8 is because of code in clk SM (8 cycles)
 sm0.active(1)
 
 #write cycle: SM1
-sm1 = rp2.StateMachine(SM + 1, dataWrite, out_base=Pin(3), set_base=Pin(3), sideset_base=Pin(4))
+sm1 = rp2.StateMachine(SM + 1, dataWrite, out_base=Pin(8), set_base=Pin(8), sideset_base=Pin(10))
 sm1.active(1)
  
 #read cycle: SM2
-sm2 = rp2.StateMachine(SM + 2, dataRead, out_base=Pin(3), in_base=Pin(5), set_base=Pin(3), sideset_base=Pin(4))
+sm2 = rp2.StateMachine(SM + 2, dataRead, out_base=Pin(8), in_base=Pin(9), set_base=Pin(8), sideset_base=Pin(10))
 sm2.active(1)
 
 #prefix 32bit high: SM3 - we use all four SMs
-sm3 = rp2.StateMachine(SM + 3, pre, set_base=Pin(3))
+sm3 = rp2.StateMachine(SM + 3, pre, set_base=Pin(8))
 sm3.active(1)
         
 prevR = 0					    #just to print when changed

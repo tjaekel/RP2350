@@ -1,27 +1,22 @@
 import rp2
 from machine import Pin
 
-@rp2.asm_pio(out_shiftdir=0, autopull=True, pull_thresh=8, autopush=True, push_thresh=8, sideset_init=(rp2.PIO.OUT_LOW), out_init=rp2.PIO.OUT_LOW)
+@rp2.asm_pio(out_shiftdir=1, in_shiftdir=1, autopull=True, pull_thresh=8, autopush=True, push_thresh=8, sideset_init=(rp2.PIO.OUT_LOW), out_init=rp2.PIO.OUT_LOW)
 def spi_cpha0():
-    # Note X must be preinitialised by setup code before first byte, we reload after sending each byte
-    # Would normally do this via exec() but in this case it's in the instruction memory and is only run once
-    set(x, 6)
+    set(x, 7)
     # Actual program body follows
     wrap_target()
-    pull(ifempty)            .side(0x0)   [1]
+    pull(ifempty)            .side(0)
+    out(pins, 1)			 			[0]
     label("bitloop")
-    out(pins, 1)             .side(0x0)   [0]
-    nop()					 .side(0x1)
-    in_(pins, 1)             .side(0x1)
-    jmp(x_dec, "bitloop")    .side(0x0)
-
-    out(pins, 1)             .side(0x0) # last bit (of 8) and prepare next byte shift
-    set(x, 6)                .side(0x1) # Note this could be replaced with mov x, y for programmable frame size
-    nop()					 .side(0x1)
-    in_(pins, 1)             .side(0x0)
-    jmp(not_osre, "bitloop") .side(0x0) # Fallthru if TXF empties
+    nop()					 .side(1)	[2]
+    in_(pins, 1)             .side(0)
+    out(pins, 1)
+    jmp(x_dec, "bitloop")    .side(0)
+    jmp(not_osre, "bitloop") .side(0) # Fallthru if TXF empties
 
     #nop()                    .side(0x0)   [1] # CSn back porch - we drive nCS as GPIO
+    set(x, 7)
     wrap()
 
 
@@ -53,8 +48,13 @@ class PIOSPI:
         rdata = []
         nCS.value(0)
         for b in wdata:
-            self._sm.put(b << 24)
-            rdata.append(self._sm.get() & 0xff)
+            #dependent on shift_dir: LSB or MSB first
+            #shift_dir=0 = MSB
+            #self._sm.put(b << 24)
+            #rdata.append(self._sm.get() & 0xff)
+            #shift_dir=1 = LSB
+            self._sm.put(b)
+            rdata.append((self._sm.get() >> 24) & 0xff)
         nCS.value(1)
         return rdata
     
@@ -62,12 +62,10 @@ print("PIO SPI")
 nCS = Pin(13, Pin.OUT, value=1)
 #nCS.value(1)
 #            ID MOSI MISO SCLK
-spi = PIOSPI(0, 11, 12, 10, freq=15000000)
+spi = PIOSPI(0, 11, 12, 10, freq=20000000)
     
 #while True:
-#after 1 MHz SCLK - the clock becomes not 50% duty cycle and slower
-#the max. SCLK is 37,500,000 Hz, but beyond 15.1 MHz we get bit errors on MISO!
-#just 1MHz seems to be OK for 50% duty cycle
+#athe max. working SCLK is 10 MHz: faster generates bit errors on MISO
 nCS.value(0)
 wdata = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
 rdata = spi.write_read_blocking(wdata)
