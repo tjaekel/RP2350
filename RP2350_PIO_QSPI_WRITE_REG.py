@@ -381,7 +381,7 @@ def dataRead():
 
 machine.freq(150000000)                   #change from 125MHz (RP2040) to 150MHz (RP2350)
 
-FREQ = 9000000                           #our frequency to generate (SCLK) - max. is 25MHz - 10MHz works OK
+FREQ = 1000000                           #our frequency to generate (SCLK) - max. is 25MHz - 10MHz works OK
 SM_NO = 0                                 #PIO2 does not work (yet)!
 
 #GPIO 7, 8 for nCS, nCS2
@@ -408,7 +408,7 @@ numCycles = 1
 while numCycles > 0:
     numCycles = numCycles - 1
     
-    #Read ChipID:
+    #WRITE 0x400B0FA0 0xE0120005:
     #WRITE:
     nCS.value(0)
     sm0.put(0x11100000)         #bit 28,24,20,16,12,8,4,0 = 0xE0
@@ -418,15 +418,25 @@ while numCycles > 0:
         pass
     #sm0.get()
     
-    Num2Wr = 3
+    Num2Wr = 6
     sm1.put(Num2Wr -1)                  #ATT: inside SM it is NUM-1 for NUM loops!
-    sm1.put(0x80050400)                 #the byte order is "inversed"! flip before to LITTLE_ENDIAN = 0x00040580
+    sm1.put(0x80010400)                 #the byte order is "inversed"! flip before to LITTLE_ENDIAN = 0x00040580
     while sm_tx_fifo_level(SM_NO + 1) > 3:
         pass
-    sm1.put(0xD00F0B40)                 #0x400B0FD0
+    sm1.put(0xA00F0B40)                 #0x400B0FD0
     while sm_tx_fifo_level(SM_NO + 1) > 3:
         pass
-    sm1.put(0x0000A0AA)                 #0x400B0FD0
+    sm1.put(0x0000D0AE)                 #0x400B0FD0
+    while sm_tx_fifo_level(SM_NO + 1) > 3:
+        pass
+    sm1.put(0x00000000)                 #0x400B0FD0
+    while sm_tx_fifo_level(SM_NO + 1) > 3:
+        pass
+    sm1.put(0x050012E0)                 #0xAAA00000
+    #why do we have such large gaps between words?
+    while sm_tx_fifo_level(SM_NO + 1) > 3:
+        pass
+    sm1.put(0xFAFFED1F)                 #0x400B0FD0
     while sm_tx_fifo_level(SM_NO + 1) > 3:
         pass
     #sm1.get()
@@ -441,7 +451,7 @@ while numCycles > 0:
         pass
     #sm0.get()
     
-    Num2Rd = 5                          #read 5 words
+    Num2Rd = 3                          #read 5 words
     sm2.put(Num2Rd - 1)                 #ATT: inside SM it is NUM-1 for NUM loops!
     for i in range(Num2Rd):
         r = sm2.get()                   #the same issue here: the byte order is "inversed"! flip it back to LITTLE ENDIAN

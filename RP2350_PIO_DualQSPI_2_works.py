@@ -199,19 +199,19 @@ def sm_dma_get(chan:int, sm:int, dst:ptr32, nword:int) -> int:
         pio = ptr32(int(PIO1_BASE))
         TREQ_SEL = sm + 12  # range 12 - 13
     smx = SM_REG_BASE + sm * SMx_SIZE + SMx_SHIFTCTRL  # get the push threshold
-    DATA_SIZE = (pio[smx] >> 20) & 0x1f  # to determine the transfer size
-    #smx = DATA_SIZE             #not used anymore
+    DATA_SIZE = (pio[smx] >> 20) & 0x1f                # to determine the transfer size
+    smx = DATA_SIZE
     if DATA_SIZE > 16 or DATA_SIZE == 0:
         DATA_SIZE = 2  # 32 bit transfer
     elif DATA_SIZE > 8:
         DATA_SIZE = 1  # 16 bit transfer
     else:
         DATA_SIZE = 0  # 8 bit transfer
-    
-    INCR_WRITE = 1  # 1 for increment while writing
-    INCR_READ  = 0  # 0 for no increment while reading
+
+    INCR_WRITE = 1   # 1 for increment while writing
+    INCR_READ  = 0   # 0 for no increment while reading
     DMA_control_word = ((IRQ_QUIET << 21) | (TREQ_SEL << 15) | (CHAIN_TO << 11) | (RING_SEL << 10) |
-                        (RING_SIZE << 6) | (INCR_WRITE << 5) | (INCR_READ << 4) | (DATA_SIZE << 2) |
+                        (RING_SIZE << 9) | (INCR_WRITE << 5) | (INCR_READ << 4) | (DATA_SIZE << 2) |
                         (HIGH_PRIORITY << 1) | (EN << 0))
     dma[READ_ADDR] = uint(pio) + PIO_RXF0 + sm * 4
     dma[WRITE_ADDR] = uint(dst)
@@ -276,7 +276,7 @@ def uart_dma_read(chan:int, uart_nr:int, data:ptr32, nword:int) -> int:
         TREQ_SEL = 23
     DATA_SIZE = 0  # byte transfer
     INCR_WRITE = 1  # 1 for increment while writing
-    INCR_READ  = 0  # 0 for no increment while reading
+    INCR_READ = 0  # 0 for no increment while reading
     DMA_control_word = ((IRQ_QUIET << 21) | (TREQ_SEL << 15) | (CHAIN_TO << 11) | (RING_SEL << 10) |
                         (RING_SIZE << 9) | (INCR_WRITE << 5) | (INCR_READ << 4) | (DATA_SIZE << 2) |
                         (HIGH_PRIORITY << 1) | (EN << 0))
@@ -391,7 +391,7 @@ def dataRead():
     
 machine.freq(150000000)                   #change from 125MHz (RP2040) to 150MHz (RP2350)
 
-FREQ = 12000000                           #our frequency to generate (SCLK) - max. is 25MHz - 10MHz works OK
+FREQ = 10000000                           #our frequency to generate (SCLK) - max. is 25MHz - 10MHz works OK
 SM_NO = 0                                 #PIO2 does not work (yet)!
 
 #GPIO 7, 8 for nCS, nCS2
@@ -410,6 +410,7 @@ sm0 = rp2.StateMachine(SM_NO + 0, cmdAddr, freq=2*FREQ, sideset_base=Pin(9), out
 sm0.active(1)
 
 #the SM to continue to append a WRITE transaction (no Turn Around)
+#                                                                   QDIR, QCLK          DIO0..DIO3
 sm1 = rp2.StateMachine(SM_NO + 1, dataWrite, freq=2*FREQ, sideset_base=Pin(9), out_base=Pin(11))
 sm1.active(1)
 
@@ -421,7 +422,7 @@ sm2.active(1)
 sm3 = rp2.StateMachine(SM_NO + 3, dataRead, freq=4*FREQ, sideset_base=Pin(9), in_base=Pin(11), set_base=Pin(11))
 sm3.active(1)
 
-#disable clock synchronizer for QD0..QD3 (GPIO11..GPIO15)
+#disable clock synchronizer for QD0..QD3, QCLKfb (GPIO11..GPIO15) - no effect
 #sm_input_sync_set(SM_NO, 0x0000F800)
 
 #-----------------------------------------------------------------------------------
@@ -442,32 +443,27 @@ def endianReverse(r0, r1):               # bytearray pointer, len(bytearray)
     sub(r1, 4)
     bpl(LOOP)
 
-numCycle = 1
-
-while numCycle > 0:
-    numCycle = numCycle - 1
+def cid():
     #-- WRITE --:
-    #nCS.value(0)
-    #sm0.put(0x11111111)         #bit 28,24,20,16,12,8,4,0 - CMD - encode properly (sent as 32bit on 4 lanes!)
-    #sm0.put(0x01234567)         #32bit : ADDR
-    #sm0.put(0x65432100)         #shift <<8 : ALT (24bit), MSB first!
-    #while sm_tx_fifo_level(SM_NO + 0) > 0:
-    #    pass
-    
     RE.value(0)                  #announce a WRITE cycle
-        
-    #with DMA: way faster burst
+
     CmdAddrAlt = array.array('i', [0x11100000, 0x00000000, 0x00001F00])
     WrData = array.array('i', [0x00040580, 0x400B0FD0, 0xAAA00000])
     endianReverse(WrData, 3*4)
     nCS.value(0)                 #direct before data transfer
+    #for i in range(3):
+    #    sm0.put(CmdAddrAlt[i])
+    #while sm_tx_fifo_level(SM_NO + 0) > 0:
+    #    pass
+
+    #with DMA: way faster burst              
     sm_dma_put(0, 0, CmdAddrAlt, 3)
     while sm_tx_fifo_level(SM_NO + 0) > 0:
         pass
             
     Num2Wr = 3
     #for i in range(Num2Wr):
-    #    sm1.put(0x12345678)                 #the byte order is "inversed"! flip before to BIG_ENDIAN
+    #    sm1.put(WrData[i])                 #the byte order is "inversed"! flip before to BIG_ENDIAN
     #    #why do we have such large gaps between words?
     #    while sm_tx_fifo_level(SM_NO + 1) > 3:
     #        pass
@@ -480,42 +476,46 @@ while numCycle > 0:
     nCS.value(1)
     
     #-- READ --:
-    #nCS.value(0)
-    #sm0.put(0x10101010)
-    #sm0.put(0x87654321)
-    #sm0.put(0x12345F00)
-    #while sm_tx_fifo_level(SM_NO + 0) > 0:
-    #    pass
-    
-    RE.value(1)                               #announce a READ cycle
-                
-    #with DMA: way faster burst
     CmdAddrAlt = array.array('i', [0x11100001, 0x00000000, 0x00001E00])
     RdData = array.array('i', [0, 0, 0, 0, 0])
-    nCS.value(0)
+    RE.value(1)                  #announce a READ cycle
+    nCS.value(0)                 #direct before data transfer
+    #RE.value(1)                  #announce a READ cycle - short after nCS going low - before 1st QCLK
+        
+    #for i in range(3):
+    #    sm0.put(CmdAddrAlt[i])
+    #while sm_tx_fifo_level(SM_NO + 0) > 0:
+    #    pass
+
+    #with DMA: way faster burst                 
     sm_dma_put(0, 0, CmdAddrAlt, 3)
-    while sm_tx_fifo_level(SM_NO + 0) > 0:
-        pass
+    #while sm_tx_fifo_level(SM_NO + 0) > 0:
+    #    pass
 
     Num2Rd = 5                                #up to 5 words are read in a single burst, later with gaps
     sm3.put(Num2Rd - 1)                       #ATT: inside SM it is NUM-1 for NUM loops!
                                               #this is slow and when printing - a large gap
     for i in range(Num2Rd):                   #after 5 words we get gaps
         r = sm3.get()                         #the same issue here: the byte order is "inversed"! flip it back to LITTLE ENDIAN
-        print(hex(r))
+        #print(hex(r))
         RdData[i] = r
     nCS.value(1)                              #WHY does it take so much time to de-assert nCS????
-    print("------------------")
-    endianReverse(RdData, Num2Rd*4)
-    #print("".join("0x%08X " % i for i in RdData))
-    for value in RdData:
-        #print(f"{value:08X}")
-        print(hex(value))
           
     #The Get DMA does not work!!! - loop stalls and it reads just the first word into buffer!
-    #sm3.put(4-1)                             #write the number of words -1
-    #print(sm_dma_get(0, 3, RdData, 4))       #can we see any DMA error code???
+    #sm3.put(Num2Rd - 1)                      #write the number of words -1
+    #sm_dma_get(0, 3, RdData, Num2Rd)         #can we see any DMA error code
+    #time.sleep_ms(1000)
+    #print(sm_fifo_status(SM_NO + 3))
+    #while sm_rx_fifo_level(SM_NO + 3) > 0:   #DOES NOT WORK, always 0
+    #    print(sm_rx_fifo_level(SM_NO + 3))
+    #    pass
     #nCS.value(1)                             #why so much time until nCS goes high? On Write much faster!
-    #endianReverse(RdData, 4*4)
-    #print(RdData)
+
+    endianReverse(RdData, 4*4)
+    for value in RdData:
+        #print(f"{value:08X}")
+        print(hex(value & 0xFFFFFFFF))
+        
+cid()
+
     

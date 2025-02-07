@@ -10,7 +10,7 @@ import array
 # pins:
 # GP7: nCS - SW control
 # GP8: nCS2 - SW control
-# GP9: QDIR signal (for external level shifter with DIR signal)
+# GP9: QDIR signal (for external level shifter with DIR signal), 1 = READ, 0 = WRITE
 # GP10: SCLK
 # GP11: DIO0
 # GP12: DIO1
@@ -20,6 +20,17 @@ import array
 # Remark:
 # the order of the 32bit words written or read are in the wrong "endian":
 # we have to flip the bytes before sending or after reading! - see function for it
+#
+# using DMAs: we have total 16 DMA channels - Internet 12 DMA channels
+# ATTENTION: make sure to use a free DMA (e.g. not one used internally by MicroPython)!
+#
+# There is a MISSING FEATURE and an issue:
+# a) we can check for "DMA done" - but it does not mean all was shifted out!
+#    There are Tx FIFOs and "DMA done" means just 'it could write to Tx FIFO' but not
+#    yet shifted out all! So, we use 'Tx FIFO empty' to avoid
+# b) but 'Tx FIFO empty' does not mean that OSR was completely shifted out!
+#    on slower clocks to send still possible to override the SM!
+# ==> there is not a PIO SM status check possible if all was shifted out!
 #+++++++++++++++++++++++++++++++++++++++++++++++++
 
 #-------------------------------------------------
@@ -173,7 +184,7 @@ CTRL_TRIG = const(3)
 CTRL_ALIAS = const(4)
 TRANS_COUNT_ALIAS = const(9)
 CHAN_ABORT = const(0x111)  # Address offset / 4
-BUSY = const(1 << 24)
+BUSY = const(1 << 26)
 #
 # Template for assembling the DMA control word
 #
@@ -183,6 +194,7 @@ RING_SEL = const(0)
 RING_SIZE = const(0)  # no wrapping
 HIGH_PRIORITY = const(1)
 EN = const(1)
+
 #
 # Read from the State machine using DMA:
 # DMA channel, State machine number, buffer, buffer length
@@ -197,21 +209,24 @@ def sm_dma_get(chan:int, sm:int, dst:ptr32, nword:int) -> int:
     else:  # PIO1
         sm %= 4
         pio = ptr32(int(PIO1_BASE))
-        TREQ_SEL = sm + 12  # range 12 - 13
+        TREQ_SEL = sm + 12  # range 12-15
     smx = SM_REG_BASE + sm * SMx_SIZE + SMx_SHIFTCTRL  # get the push threshold
-    DATA_SIZE = (pio[smx] >> 20) & 0x1f  # to determine the transfer size
-    #smx = DATA_SIZE             #not used anymore
+    DATA_SIZE = (pio[smx] >> 20) & 0x1f                # to determine the transfer size
+    #smx = DATA_SIZE
     if DATA_SIZE > 16 or DATA_SIZE == 0:
         DATA_SIZE = 2  # 32 bit transfer
     elif DATA_SIZE > 8:
         DATA_SIZE = 1  # 16 bit transfer
     else:
         DATA_SIZE = 0  # 8 bit transfer
-    
-    INCR_WRITE = 1  # 1 for increment while writing
-    INCR_READ  = 0  # 0 for no increment while reading
-    DMA_control_word = ((IRQ_QUIET << 21) | (TREQ_SEL << 15) | (CHAIN_TO << 11) | (RING_SEL << 10) |
-                        (RING_SIZE << 6) | (INCR_WRITE << 5) | (INCR_READ << 4) | (DATA_SIZE << 2) |
+
+    INCR_WRITE = 1   # 1 for increment while writing
+    INCR_READ  = 0   # 0 for no increment while reading
+    #DMA_control_word = ((IRQ_QUIET << 21) | (TREQ_SEL << 15) | (CHAIN_TO << 11) | (RING_SEL << 10) |
+    #                    (RING_SIZE << 9) | (INCR_WRITE << 5) | (INCR_READ << 4) | (DATA_SIZE << 2) |
+    #                    (HIGH_PRIORITY << 1) | (EN << 0))
+    DMA_control_word = ((IRQ_QUIET << 23) | (TREQ_SEL << 17) | (CHAIN_TO << 13) | (RING_SEL << 12) |
+                        (RING_SIZE << 8) | (INCR_WRITE << 6) | (INCR_READ << 4) | (DATA_SIZE << 2) |
                         (HIGH_PRIORITY << 1) | (EN << 0))
     dma[READ_ADDR] = uint(pio) + PIO_RXF0 + sm * 4
     dma[WRITE_ADDR] = uint(dst)
@@ -245,8 +260,11 @@ def sm_dma_put(chan:int, sm:int, src:ptr32, nword:int) -> int:
 
     INCR_WRITE = 0  # 1 for increment while writing
     INCR_READ  = 1  # 0 for no increment while reading
-    DMA_control_word = ((IRQ_QUIET << 21) | (TREQ_SEL << 15) | (CHAIN_TO << 11) | (RING_SEL << 10) |
-                        (RING_SIZE << 9) | (INCR_WRITE << 5) | (INCR_READ << 4) | (DATA_SIZE << 2) |
+    #DMA_control_word = ((IRQ_QUIET << 21) | (TREQ_SEL << 15) | (CHAIN_TO << 11) | (RING_SEL << 10) |
+    #                    (RING_SIZE << 9) | (INCR_WRITE << 5) | (INCR_READ << 4) | (DATA_SIZE << 2) |
+    #                    (HIGH_PRIORITY << 1) | (EN << 0))
+    DMA_control_word = ((IRQ_QUIET << 23) | (TREQ_SEL << 17) | (CHAIN_TO << 13) | (RING_SEL << 12) |
+                        (RING_SIZE << 8) | (INCR_WRITE << 6) | (INCR_READ << 4) | (DATA_SIZE << 2) |
                         (HIGH_PRIORITY << 1) | (EN << 0))
     dma[READ_ADDR] = uint(src)
     dma[WRITE_ADDR] = uint(pio) + PIO_TXF0 + sm * 4
@@ -276,7 +294,7 @@ def uart_dma_read(chan:int, uart_nr:int, data:ptr32, nword:int) -> int:
         TREQ_SEL = 23
     DATA_SIZE = 0  # byte transfer
     INCR_WRITE = 1  # 1 for increment while writing
-    INCR_READ  = 0  # 0 for no increment while reading
+    INCR_READ = 0  # 0 for no increment while reading
     DMA_control_word = ((IRQ_QUIET << 21) | (TREQ_SEL << 15) | (CHAIN_TO << 11) | (RING_SEL << 10) |
                         (RING_SIZE << 9) | (INCR_WRITE << 5) | (INCR_READ << 4) | (DATA_SIZE << 2) |
                         (HIGH_PRIORITY << 1) | (EN << 0))
@@ -285,13 +303,30 @@ def uart_dma_read(chan:int, uart_nr:int, data:ptr32, nword:int) -> int:
     dma[TRANS_COUNT] = nword
     dma[CTRL_TRIG] = DMA_control_word  # and this starts the transfer
     return DMA_control_word
+
+#
+# Get the current DMA busy
+#
+#@micropython.viper
+#def dma_busy(chan:uint) -> bool:
+#    dma=ptr32(uint(DMA_BASE) + chan * 0x40)
+#    if dma[CTRL_TRIG] & BUSY:
+#        return True
+#    else:
+#        return False
+    
+@micropython.viper
+def dma_busy(chan:uint) -> int:
+    dma=ptr32(uint(DMA_BASE) + chan * 0x40)
+    return dma[CTRL_TRIG] & BUSY
+        
 #
 # Get the current transfer count
 #
 @micropython.viper
 def dma_transfer_count(chan:uint) -> int:
     dma=ptr32(uint(DMA_BASE) + chan * 0x40)
-    return dma[TRANS_COUNT]
+    return dma[TRANS_COUNT] & 0x0FFFFFFF
 #
 # Get the current write register value
 #
@@ -322,8 +357,9 @@ def dma_abort(chan:uint):
 #RP2350 PIO QSPI example:
 #=======================
 
-#GPIO pin offsets:     no speed increase                                                              bit0 = QDIR,      bit1 = QCLK,                bit0..3 = DATA (out, 4 data lanes)
-@rp2.asm_pio(fifo_join=rp2.PIO.JOIN_TX, out_shiftdir=0, pull_thresh=32, autopull=False, sideset_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_HIGH), out_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW))
+#GPIO pin of                                                               bit0 = QDIR,      bit1 = QCLK,                bit0..3 = DATA (out, 4 data lanes)
+#@rp2.asm_pio(fifo_join=rp2.PIO.JOIN_TX, out_shiftdir=0, pull_thresh=32, autopull=False, sideset_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_HIGH), out_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW))
+@rp2.asm_pio(out_shiftdir=0, pull_thresh=32, autopull=False, sideset_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_HIGH), out_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW))
 def cmdAddr():
     wrap_target()
     set(y, 1)                   .side(2)  #1: we send 2x 32bit words (CMD + ADDR), QCLK=1, QDIR=1 
@@ -341,8 +377,9 @@ def cmdAddr():
     jmp(x_dec, "ALT_LOOP")      .side(2)  #10
     wrap()
     
-#                      no speed increase                               True fails on Read!
+#                                                                        True fails
 @rp2.asm_pio(fifo_join=rp2.PIO.JOIN_TX, out_shiftdir=0, pull_thresh=32, autopull=False, sideset_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_HIGH), out_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW))
+#@rp2.asm_pio(out_shiftdir=0, pull_thresh=32, autopull=False, sideset_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_HIGH), out_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW))
 def dataWrite():
     wrap_target()
     set(x, 7)                   .side(2)  #11: 8x 4bit words = 32bit (NUM here is always -1 for the loop, like a do-while() )
@@ -353,8 +390,8 @@ def dataWrite():
     wrap()
     #Remark: this generates a gap between the 32bit words sent - but why?
 
-#                                                                                                         bit0: QCLK
-@rp2.asm_pio(in_shiftdir=0, pull_thresh=32, push_thresh=32, autopull=False, autopush=False, sideset_init=(rp2.PIO.OUT_HIGH))
+#                                                                           bit0: QCLK     autopush, autopoll not needed here
+@rp2.asm_pio(in_shiftdir=0, pull_thresh=32, push_thresh=32, sideset_init=(rp2.PIO.OUT_HIGH))
 def readClk():
     wrap_target()
     set(x, 7)                             #15: generate 8 clocks for reading QSPI 32bit word
@@ -364,26 +401,26 @@ def readClk():
     jmp(x_dec, "clkloop")   [1] .side(1)  #18: 50% duty cycle, needs 4x PIO clock
     wrap()
     
-#                                                             True fails!                                bit0: QDIR, bit1: QCLK
+#                                                             True fails!   push() needed                     bit0: QDIR, bit1: QCLK
 @rp2.asm_pio(in_shiftdir=0, pull_thresh=32, push_thresh=32, autopull=False, autopush=True, sideset_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_HIGH), set_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW))
 def dataRead():
     wrap_target()
     pull()                                #19: get number of words to read: ATT: NUM-1 is needed here!
-    mov(y, osr)             [1] .side(1)  #20: keep number of words to read, QCLK=0, QDIR=1 already - here as earliest as possible
-    set(pindirs, 0x0)       [1] .side(3)  #21: change direction, QCLK=1, QDIR=1
-    nop()                   [1] .side(1)  #22: QCLK=0, QDIR=1
-    nop()                   [0] .side(3)  #23: two turnaround clocks generated
+    mov(y, osr)             [2] .side(0)  #20: keep number of words to read, QCLK=0, QDIR=1 already - here as earliest as possible
+    set(pindirs, 0x0)       [2] .side(2)  #21: change direction, QCLK=1, QDIR=1
+    nop()                   [2] .side(0)  #22: QCLK=0, QDIR=1
+    nop()                   [0] .side(2)  #23: two turnaround clocks generated
     label("ALL_READ_LOOP")
     set(x, 7)                             #24: we have 8x 4bit = 32bit (4 lanes)
     irq(4)                                #25: two turnaround clocks generated - release the Read clock generator = one instruction later
     label("WORD_READ_LOOP")               #    wait for rising QCLKfb
     wait(0, pin, 4)                       #26:
     wait(1, pin, 4)                       #27: GPIO11.14 = QD0..QD3, GPIO15 = QCLKin - the same as above - assume QCLK was 0 in between!
-    in_(pins, 4)            [0]           #28: get 4 bits from 4 pallel data lanes - it samples one instruction cycle after falling edge!
+    in_(pins, 4)                          #28: get 4 bits from 4 pallel data lanes - it samples one instruction cycle after falling edge!
                                           #    one instruction cycle plus delay: QCLK still 1
                                           #    make sure QCLK is 0 in between so that "wait(1, pin, 4)" waits for raising edge!!!
     jmp(x_dec, "WORD_READ_LOOP")          #29: one instruction cycle QCLK - it should go 0 now
-    #push()                               #  : we use autopush to save nmumber of instructions
+    #push(noblock)                         #  : we use autopush to save nmumber of instructions
     jmp(y_dec, "ALL_READ_LOOP")           #30: keep going until all words read
     set(pindirs, 0xf)           .side(2)  #31: set nCS high, de-assert QDIR signal = end of transfer - takes a while to see - WHY???
                                           #  : are we out of the 32 instrcutions? MAX. 32!
@@ -391,8 +428,9 @@ def dataRead():
     
 machine.freq(150000000)                   #change from 125MHz (RP2040) to 150MHz (RP2350)
 
-FREQ = 12000000                           #our frequency to generate (SCLK) - max. is 25MHz - 10MHz works OK
-SM_NO = 0                                 #PIO2 does not work (yet)!
+FREQ = 2000000                            #our frequency to generate (SCLK) - max. is 25MHz - 10MHz works OK
+#glitches on DIR signal and on QCLK if 1 MHz - below 2 MHz FAILS!
+SM_NO = 0                                 #0,4,8: PIO2(=8) does not work (yet)!
 
 #GPIO 7, 8 for nCS, nCS2
 nCS  = Pin(7, Pin.OUT, value=1)
@@ -402,7 +440,7 @@ nCS2 = Pin(8, Pin.OUT, value=1)
 SCLKin = Pin(15, Pin.IN)
 
 #RE signal:
-RE = Pin(16, Pin.OUT, value=0)            #default: a WRITE
+RE = Pin(16, Pin.OUT, value=0)            #default: a WRITE = 0
 
 #the SM for sending the pre-fix: CMD (single-lane), ADDR (32bit, 4-lane), ALT (24bit, 4-lane)
 #                                                                   QDIR, QCLK          DIO0..DIO3
@@ -410,6 +448,7 @@ sm0 = rp2.StateMachine(SM_NO + 0, cmdAddr, freq=2*FREQ, sideset_base=Pin(9), out
 sm0.active(1)
 
 #the SM to continue to append a WRITE transaction (no Turn Around)
+#                                                                   QDIR, QCLK          DIO0..DIO3
 sm1 = rp2.StateMachine(SM_NO + 1, dataWrite, freq=2*FREQ, sideset_base=Pin(9), out_base=Pin(11))
 sm1.active(1)
 
@@ -418,11 +457,11 @@ sm2 = rp2.StateMachine(SM_NO + 2, readClk, freq=4*FREQ, sideset_base=Pin(10))
 sm2.active(1)
 
 #the SM to continue to append a READ transaction (with 2bit Turn Around) - generates turnaround clocks - same clock reference!
-sm3 = rp2.StateMachine(SM_NO + 3, dataRead, freq=4*FREQ, sideset_base=Pin(9), in_base=Pin(11), set_base=Pin(11))
+sm3 = rp2.StateMachine(SM_NO + 3, dataRead, freq=6*FREQ, sideset_base=Pin(9), in_base=Pin(11), set_base=Pin(11))
 sm3.active(1)
 
-#disable clock synchronizer for QD0..QD3 (GPIO11..GPIO15)
-#sm_input_sync_set(SM_NO, 0x0000F800)
+#disable clock synchronizer for QD0..QD3, QCLKfb (GPIO11..GPIO15) - no effect
+sm_input_sync_set(SM_NO, 0x0000F800)
 
 #-----------------------------------------------------------------------------------
 #Utility functions: swap the endian in a 32bit word (needed for QSPI data part)
@@ -442,80 +481,126 @@ def endianReverse(r0, r1):               # bytearray pointer, len(bytearray)
     sub(r1, 4)
     bpl(LOOP)
 
-numCycle = 1
-
-while numCycle > 0:
-    numCycle = numCycle - 1
+def cid():
     #-- WRITE --:
-    #nCS.value(0)
-    #sm0.put(0x11111111)         #bit 28,24,20,16,12,8,4,0 - CMD - encode properly (sent as 32bit on 4 lanes!)
-    #sm0.put(0x01234567)         #32bit : ADDR
-    #sm0.put(0x65432100)         #shift <<8 : ALT (24bit), MSB first!
-    #while sm_tx_fifo_level(SM_NO + 0) > 0:
-    #    pass
-    
-    RE.value(0)                  #announce a WRITE cycle
-        
-    #with DMA: way faster burst
     CmdAddrAlt = array.array('i', [0x11100000, 0x00000000, 0x00001F00])
     WrData = array.array('i', [0x00040580, 0x400B0FD0, 0xAAA00000])
     endianReverse(WrData, 3*4)
     nCS.value(0)                 #direct before data transfer
-    sm_dma_put(0, 0, CmdAddrAlt, 3)
+    RE.value(0)                  #announce a WRITE cycle
+
+    #with DMA: way faster burst              
+    sm_dma_put(0, SM_NO + 0, CmdAddrAlt, 3)
     while sm_tx_fifo_level(SM_NO + 0) > 0:
         pass
+    #while (dma_busy(0)):                   #we cannot use "DMA done"! It does not mean the PIO FIFO was shifted out!
+    #    pass
             
     Num2Wr = 3
-    #for i in range(Num2Wr):
-    #    sm1.put(0x12345678)                 #the byte order is "inversed"! flip before to BIG_ENDIAN
-    #    #why do we have such large gaps between words?
-    #    while sm_tx_fifo_level(SM_NO + 1) > 3:
-    #        pass
-     
-    #with DMA: way faster burst - just a gap between 1st and 2nd DMA!
-    sm_dma_put(0, 1, WrData, Num2Wr)
-    while sm_tx_fifo_level(SM_NO + 0) > 0:
+    sm_dma_put(0, SM_NO + 1, WrData, Num2Wr)
+    while sm_tx_fifo_level(SM_NO + 1) > 0:
         pass
+    #while (dma_busy(0)):                   #we cannot use "DMA done"! It does not mean the PIO FIFO was shifted out!
+    #    pass
     
     nCS.value(1)
     
     #-- READ --:
-    #nCS.value(0)
-    #sm0.put(0x10101010)
-    #sm0.put(0x87654321)
-    #sm0.put(0x12345F00)
-    #while sm_tx_fifo_level(SM_NO + 0) > 0:
-    #    pass
-    
-    RE.value(1)                               #announce a READ cycle
-                
-    #with DMA: way faster burst
     CmdAddrAlt = array.array('i', [0x11100001, 0x00000000, 0x00001E00])
     RdData = array.array('i', [0, 0, 0, 0, 0])
-    nCS.value(0)
-    sm_dma_put(0, 0, CmdAddrAlt, 3)
+    nCS.value(0)                 #direct before data transfer
+    RE.value(1)                  #announce a READ cycle
+               
+    sm_dma_put(0, SM_NO + 0, CmdAddrAlt, 3)
     while sm_tx_fifo_level(SM_NO + 0) > 0:
         pass
+    #while (dma_busy(0)):                     #we cannot use "DMA done"! It does not mean the PIO FIFO was shifted out!
+    #    pass
 
     Num2Rd = 5                                #up to 5 words are read in a single burst, later with gaps
-    sm3.put(Num2Rd - 1)                       #ATT: inside SM it is NUM-1 for NUM loops!
-                                              #this is slow and when printing - a large gap
-    for i in range(Num2Rd):                   #after 5 words we get gaps
-        r = sm3.get()                         #the same issue here: the byte order is "inversed"! flip it back to LITTLE ENDIAN
-        print(hex(r))
-        RdData[i] = r
-    nCS.value(1)                              #WHY does it take so much time to de-assert nCS????
-    print("------------------")
+    #sm3.put(Num2Rd - 1)                      #write the number of words -1
+    #for i in range(Num2Rd):                  #after 5 words we get gaps
+    #    r = sm3.get()                        #the same issue here: the byte order is "inversed"! flip it back to LITTLE ENDIAN
+    #    RdData[i] = r
+          
+    #we have to enable DMA before releasing READ part!
+    sm_dma_get(0, 3, RdData, Num2Rd)          #can we see any DMA error code
+    sm3.put(Num2Rd - 1)                       #write the number of words -1
+    #while sm_rx_fifo_level(SM_NO + 3) > 0:
+    #    pass
+    while (dma_busy(0)):                      #this is OK: Rx FIFO should be empty
+        pass
+    nCS.value(1)
+    RE.value(0)
+
     endianReverse(RdData, Num2Rd*4)
-    #print("".join("0x%08X " % i for i in RdData))
     for value in RdData:
         #print(f"{value:08X}")
-        print(hex(value))
+        print(hex(value & 0xFFFFFFFF))
+        
+def led():
+    #-- WRITE --:
+    CmdAddrAlt = array.array('i', [0x11100000, 0x00000000, 0x00001F00])
+    WrData = array.array('i', [0x00040180, 0x400B0FA0, 0xAED00000, 0x00000000, 0xE0120005, 0x1FEDFFFA])
+    Num2Wr = 6
+    Num2Rd = 3
+    endianReverse(WrData, 6*4)
+    nCS.value(0)                 #direct before data transfer
+    RE.value(0)                  #announce a WRITE cycle
+             
+    sm_dma_put(0, SM_NO + 0, CmdAddrAlt, 3)
+    while sm_tx_fifo_level(SM_NO + 0) > 0:
+        pass
+    #while (dma_busy(0)):        #we cannot use "DMA done"! It does not mean the PIO FIFO was shifted out!
+    #    pass
+
+    sm_dma_put(0, SM_NO + 1, WrData, Num2Wr)
+    while sm_tx_fifo_level(SM_NO + 1) > 0:
+        pass
+    #while (dma_busy(0)):        #we cannot use "DMA done"! It does not mean the PIO FIFO was shifted out!
+    #    pass
+    nCS.value(1)
+
+    #-- READ --:
+    CmdAddrAlt = array.array('i', [0x11100001, 0x00000000, 0x00001E00])
+    RdData = array.array('i', [0, 0, 0])
+    nCS.value(0)                 #direct before data transfer
+    RE.value(1)                  #announce a READ cycle
+                
+    sm_dma_put(0, SM_NO + 0, CmdAddrAlt, 3)
+    while sm_tx_fifo_level(SM_NO + 0) > 0:
+        pass
+    #while (dma_busy(0)):                      #we cannot use "DMA done"! It does not mean the PIO FIFO was shifted out!
+    #    pass
+
+    #sm3.put(Num2Rd - 1)                       #ATT: inside SM it is NUM-1 for NUM loops!
+    #                                          #make sure to be fast for read value!
+    #for i in range(Num2Rd):                   #after 5 words we get gaps
+    #    r = sm3.get()                         #the same issue here: the byte order is "inversed"! flip it back to LITTLE ENDIAN
+    #                                          #if too fast QCLK - we can hang here!
+    #    RdData[i] = r
           
-    #The Get DMA does not work!!! - loop stalls and it reads just the first word into buffer!
-    #sm3.put(4-1)                             #write the number of words -1
-    #print(sm_dma_get(0, 3, RdData, 4))       #can we see any DMA error code???
-    #nCS.value(1)                             #why so much time until nCS goes high? On Write much faster!
-    #endianReverse(RdData, 4*4)
-    #print(RdData)
-    
+    ##DMA channel > 0 DOES NOT WORK YET! - something is sent afterwards - e.g. when we use DMA channel 1!
+    #----------------------------------------------------------------------------------------------------
+        
+    #we have to enable DMA before releasing READ part!
+    sm_dma_get(0, SM_NO + 3, RdData, Num2Rd)
+    sm3.put(Num2Rd - 1)                      #write the number of words -1
+    #while sm_rx_fifo_level(SM_NO + 3) > 0:
+    #    pass
+    while (dma_busy(0)):                     #this is OK, Rx FIFO should be empty
+        pass
+    nCS.value(1)
+    RE.value(0)
+
+    endianReverse(RdData, Num2Rd*4)
+    for value in RdData:
+        print(hex(value & 0xFFFFFFFF))
+
+led()
+led()
+led()
+cid()
+cid()
+cid()
+
